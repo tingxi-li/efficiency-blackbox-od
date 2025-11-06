@@ -1,0 +1,26 @@
+{
+    "WORLD_CFG": {
+        "RANDOM_SEED": 42,
+        "NGPUS": 2,
+        "COCO_ROOT": "./coco",
+        "DIR_TO_COCO_IMG": "/val2017",
+        "DIR_TO_COCO_ANN": "/annotations/instances_val2017.json"
+    },
+
+    "INFERENCE_CFG": {
+        "SUBSET_SIZE": 50,
+        "BATCH_SIZE": 16
+    },
+
+    "MODEL_CFG": {
+        "rtdetr_r50vd": {"NUM_QUERIES": 300, "CONF_THRES": 0.5}, 
+        "rtdetr_r18vd": {"NUM_QUERIES": 300, "CONF_THRES": 0.5},
+        "yolov5su": {"TOPK": 300, "IOU_THRES": 0.45, "CONF_THRES": 0.25},     
+        "yolov8n": {"TOPK": 300, "IOU_THRES": 0.7, "CONF_THRES": 0.25}       
+    },
+
+    "MUTATION_CFG": {
+        "BUDGET": 10
+    }
+    
+}
