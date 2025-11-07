@@ -75,7 +75,7 @@ class HybridMetric:
 # 1. Pixel-level Mutations
 # --------------------------------
 class PixelMutator:
-    def __init__(self, noise_std: float = 0.001, brightness: float = 0.005, blur_prob: float = 0.01, kernel_size: int = 3):
+    def __init__(self, noise_std: float = 0.0001, brightness: float = 0.0005, blur_prob: float = 0.001, kernel_size: int = 3):
         self.noise_std = noise_std
         self.brightness = brightness
         self.blur_prob = blur_prob
@@ -126,7 +126,7 @@ class PixelMutator:
 # 2. Geometric Mutations
 # --------------------------------
 class GeometricMutator:
-    def __init__(self, max_angle: float = 0.3, max_trans: float = 0.001, max_scale: float = 0.005):
+    def __init__(self, max_angle: float = 0.5, max_trans: float = 0.01, max_scale: float = 0.05):
         self.max_angle = max_angle
         self.max_trans = max_trans
         self.max_scale = max_scale
@@ -196,7 +196,7 @@ class GeometricMutator:
 # 3. Perceptual Mutations
 # --------------------------------
 class PerceptualMutator:
-    def __init__(self, jpeg_quality=(40, 90), color_shift: float = 0.005):
+    def __init__(self, jpeg_quality=(75, 90), color_shift: float = 0.0005):
         self.jpeg_quality = jpeg_quality
         self.color_shift = color_shift
 
@@ -483,7 +483,12 @@ if __name__ == "__main__":
     # import pdb; pdb.set_trace()
     
     # mutator_1 = UnifiedMutator(yolov5su_batch, budget_total=1.0, lambdas={"pixel": 0.15, "geom": 0.15, "perc": 0.7}, max_steps=200)
-    mutator_1 = UnifiedMutator(yolov5su_batch, budget_total=1.0, max_steps=200)
+    
+    budget = 0.15
+    max_steps = 1000
+    # lambdas = {"pixel": 0.15, "geom": 0.15, "perc": 0.70}
+    lambdas = {"pixel": 0.3, "geom": 0.3, "perc": 0.4}
+    mutator_1 = UnifiedMutator(yolov5su_batch, budget_total=budget, lambdas=lambdas, max_steps=max_steps)
 
     cnt = 0
     while True:
@@ -497,7 +502,7 @@ if __name__ == "__main__":
     save_tensor_as_image(mutator_1.current_batch(), out_dir="./test_perturbed_images", fmt="png")
     
     cnt = 0
-    mutator_2 = UnifiedMutator(rtdetr_batch, budget_total=1.0, max_steps=200)
+    mutator_2 = UnifiedMutator(rtdetr_batch, budget_total=budget, lambdas=lambdas, max_steps=max_steps)
     while True:
         mutator_2.step()
         if all(not m.can_mutate() for m in mutator_2.sample_mutators):
@@ -509,7 +514,7 @@ if __name__ == "__main__":
     save_tensor_as_image(mutator_2.current_batch(), out_dir="./test_perturbed_images", fmt="png")
     
     cnt = 0
-    mutator_3 = UnifiedMutator(yolov8_batch, budget_total=1.0, max_steps=200)
+    mutator_3 = UnifiedMutator(yolov8_batch, budget_total=budget, lambdas=lambdas, max_steps=max_steps)
     while True:
         mutator_3.step()
         if all(not m.can_mutate() for m in mutator_3.sample_mutators):
