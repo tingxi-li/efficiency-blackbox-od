@@ -8,7 +8,7 @@
     },
 
     "INFERENCE_CFG": {
-        "SUBSET_SIZE": 50,
+        "SUBSET_SIZE": 200,
         "BATCH_SIZE": 16
     },
 

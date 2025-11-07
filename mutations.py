@@ -75,11 +75,20 @@ class HybridMetric:
 # 1. Pixel-level Mutations
 # --------------------------------
 class PixelMutator:
-    def __init__(self, noise_std: float = 0.0001, brightness: float = 0.0005, blur_prob: float = 0.001, kernel_size: int = 3):
+    def __init__(self, noise_std: float = 0.03, brightness: float = 0.07, blur_prob: float = 0.1, kernel_size: int = 3):
         self.noise_std = noise_std
         self.brightness = brightness
         self.blur_prob = blur_prob
         self.kernel_size = kernel_size
+
+    def _ensure_bchw(self, x: torch.Tensor):
+        squeeze = False
+        if x.dim() == 3:
+            x = x.unsqueeze(0)
+            squeeze = True
+        if x.dim() != 4:
+            raise ValueError(f"PixelMutator expects CHW or BCHW tensor, got shape {tuple(x.shape)}")
+        return x, squeeze
 
     def add_noise(self, x: torch.Tensor, noise_std: Optional[float] = None):
         std = noise_std if noise_std is not None else self.noise_std
@@ -116,7 +125,11 @@ class PixelMutator:
             op_name = random.choice(list(ops.keys()))
         if explicit and op_name == "gaussian_blur":
             op_kwargs.setdefault("force", True)
-        return ops[op_name](x, **op_kwargs)
+        x_batch, squeeze = self._ensure_bchw(x)
+        out, info = ops[op_name](x_batch, **op_kwargs)
+        if squeeze and out.size(0) == 1:
+            out = out.squeeze(0)
+        return out, info
 
     def mutate(self, x: torch.Tensor):
         return self.apply(x)
@@ -126,7 +139,7 @@ class PixelMutator:
 # 2. Geometric Mutations
 # --------------------------------
 class GeometricMutator:
-    def __init__(self, max_angle: float = 0.5, max_trans: float = 0.01, max_scale: float = 0.05):
+    def __init__(self, max_angle: float = 4, max_trans: float = 0.02, max_scale: float = 0.04):
         self.max_angle = max_angle
         self.max_trans = max_trans
         self.max_scale = max_scale
@@ -157,6 +170,13 @@ class GeometricMutator:
         ty: Optional[float] = None,
         scale: Optional[float] = None,
     ):
+        squeeze_back = False
+        if x.dim() == 3:
+            x = x.unsqueeze(0)
+            squeeze_back = True
+        if x.dim() != 4:
+            raise ValueError(f"GeometricMutator expects BCHW or CHW input, got {tuple(x.shape)}")
+
         B, C, H, W = x.shape
         angle = angle if angle is not None else random.uniform(-self.max_angle, self.max_angle)
         tx = tx if tx is not None else random.uniform(-self.max_trans, self.max_trans)
@@ -181,6 +201,10 @@ class GeometricMutator:
         theta_total = self._compose(theta, prev_theta)
         geom_cost = self._geometry_cost(theta_total, x.size(), x.device, x.dtype)
 
+        if squeeze_back and x_out.size(0) == 1:
+            x_out = x_out.squeeze(0)
+            theta_total = theta_total[:1]
+
         return x_out, {
             "geom": geom_cost,
             "op": op_name or "affine",
@@ -196,7 +220,7 @@ class GeometricMutator:
 # 3. Perceptual Mutations
 # --------------------------------
 class PerceptualMutator:
-    def __init__(self, jpeg_quality=(75, 90), color_shift: float = 0.0005):
+    def __init__(self, jpeg_quality=(40, 95), color_shift: float = 0.05):
         self.jpeg_quality = jpeg_quality
         self.color_shift = color_shift
 
