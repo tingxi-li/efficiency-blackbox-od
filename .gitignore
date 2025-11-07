@@ -1,5 +1,6 @@
 __pycache__/
 coco/
+test_perturbed_images/
 *.pyc
 .env
 .DS_Store

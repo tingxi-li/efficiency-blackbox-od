@@ -20,7 +20,8 @@
     },
 
     "MUTATION_CFG": {
-        "BUDGET": 10
+        "BUDGET_STEPS": 50,
+        "LAMBDAS": {"pixel": 1.0, "geom": 1.0, "perc": 1.0}
     }
     
 }
