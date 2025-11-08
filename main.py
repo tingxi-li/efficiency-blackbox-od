@@ -41,8 +41,9 @@ def parse_args():
     parser.add_argument("--patience", type=int, default=100, help="Early-stop patience (generations)")
     parser.add_argument("--tol", type=float, default=1.0, help="Minimum fitness gain to reset patience")
     parser.add_argument("--score-thr", type=float, default=0.05, help="Score threshold for visualization overlays & fitness calc")
-    parser.add_argument("--output-dir", type=str, default="results", help="Directory to store GA outputs")
+    parser.add_argument("--output-dir", type=str, default="results-dev", help="Directory to store GA outputs")
     parser.add_argument("--seed", type=int, default=None, help="Optional override for RANDOM_SEED")
+    parser.add_argument("--allow-multi-ref", action="store_true", help="Allow GA to mix multiple seed images (defaults to single-image perturbation)")
     return parser.parse_args()
 
 
@@ -206,6 +207,7 @@ def main():
         patience=args.patience,
         tol=args.tol,
         device=device,
+        restrict_single_reference=not args.allow_multi_ref,
     )
     duration = time.time() - start_time
 

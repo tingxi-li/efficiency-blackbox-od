@@ -75,7 +75,7 @@ class HybridMetric:
 # 1. Pixel-level Mutations
 # --------------------------------
 class PixelMutator:
-    def __init__(self, noise_std: float = 0.03, brightness: float = 0.07, blur_prob: float = 0.1, kernel_size: int = 3):
+    def __init__(self, noise_std: float = 0.05, brightness: float = 0.2, blur_prob: float = 0.1, kernel_size: int = 3):
         self.noise_std = noise_std
         self.brightness = brightness
         self.blur_prob = blur_prob
@@ -139,7 +139,7 @@ class PixelMutator:
 # 2. Geometric Mutations
 # --------------------------------
 class GeometricMutator:
-    def __init__(self, max_angle: float = 4, max_trans: float = 0.02, max_scale: float = 0.04):
+    def __init__(self, max_angle: float = 5, max_trans: float = 0.02, max_scale: float = 0.05):
         self.max_angle = max_angle
         self.max_trans = max_trans
         self.max_scale = max_scale

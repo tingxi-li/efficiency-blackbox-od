@@ -5,6 +5,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 
 @dataclass
@@ -12,6 +13,8 @@ class Individual:
     """Container that keeps track of a candidate tensor and its metadata."""
 
     tensor: torch.Tensor
+    reference: Optional[torch.Tensor] = None
+    seed_id: Optional[int] = None
     baseline_stats: Optional[Dict[str, float]] = None
     ema: float = 0.0
     history: Dict = field(default_factory=dict)
@@ -19,6 +22,8 @@ class Individual:
     def clone(self) -> "Individual":
         return Individual(
             tensor=self.tensor.clone(),
+            reference=self.reference.clone() if self.reference is not None else None,
+            seed_id=self.seed_id,
             baseline_stats=self.baseline_stats.copy() if self.baseline_stats else None,
             ema=self.ema,
             history=self.history.copy(),
@@ -89,6 +94,92 @@ def compute_energy_from_results(
     return float(value)
 
 
+def _normalized_l2_penalty(tensor: torch.Tensor, reference: torch.Tensor) -> float:
+    diff = (tensor - reference).float()
+    numel = diff.numel()
+    if numel == 0:
+        return 0.0
+    return (torch.norm(diff) / math.sqrt(numel)).item()
+
+
+def _smoothness_penalty(tensor: torch.Tensor) -> float:
+    if tensor.ndim == 3:
+        tensor = tensor.unsqueeze(0)
+    if tensor.ndim != 4:
+        return 0.0
+    dx = torch.abs(tensor[:, :, :, 1:] - tensor[:, :, :, :-1]).mean()
+    dy = torch.abs(tensor[:, :, 1:, :] - tensor[:, :, :-1, :]).mean()
+    return (dx + dy).item()
+
+
+def _make_smooth_mask(h: int, w: int, device, kernel: int = 31):
+    mask = torch.rand(1, 1, h, w, device=device)
+    if kernel > 1:
+        pad = kernel // 2
+        mask = F.avg_pool2d(mask, kernel_size=kernel, stride=1, padding=pad)
+    return mask.clamp(0.1, 0.9)
+
+
+def _ensure_single_three_channel(t: torch.Tensor) -> torch.Tensor:
+    if t.ndim == 3:
+        t = t.unsqueeze(0)
+    if t.ndim != 4:
+        raise ValueError(f"Expected CHW or BCHW tensor, got shape {tuple(t.shape)}")
+    if t.size(0) != 1:
+        t = t[:1]
+    if t.size(1) == 1:
+        t = t.repeat(1, 3, 1, 1)
+    return t
+
+
+def _perceptual_penalty(tensor: torch.Tensor, reference: Optional[torch.Tensor]) -> float:
+    if reference is None:
+        return 0.0
+    x = _ensure_single_three_channel(tensor).float()
+    ref = _ensure_single_three_channel(reference).to(x.device).float()
+    # multi-scale blur difference
+    penalty = 0.0
+    weights = [1.0, 0.5]
+    kernels = [3, 5]
+    for w, k in zip(weights, kernels):
+        pad = k // 2
+        x_blur = F.avg_pool2d(x, kernel_size=k, stride=1, padding=pad)
+        ref_blur = F.avg_pool2d(ref, kernel_size=k, stride=1, padding=pad)
+        penalty += w * torch.mean(torch.abs(x_blur - ref_blur))
+    return penalty.item()
+
+
+def _alpha_blend(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    a = _ensure_single_three_channel(a)
+    b = _ensure_single_three_channel(b)
+    if a.shape != b.shape:
+        raise ValueError(f"Alpha blend requires tensors of same shape, got {tuple(a.shape)} vs {tuple(b.shape)}")
+    _, _, h, w = a.shape
+    mask = _make_smooth_mask(h, w, a.device)
+    alpha = 0.5 + random.uniform(-0.2, 0.2)
+    mask = mask * alpha + (1 - mask) * (1 - alpha)
+    blended = mask * a + (1 - mask) * b
+    return blended.squeeze(0)
+
+
+def _apply_roi_blend(base: torch.Tensor, candidate: torch.Tensor, min_ratio=0.1, max_ratio=0.35, alpha_range=(0.4, 0.8)):
+    candidate = _ensure_single_three_channel(candidate)
+    base = _ensure_single_three_channel(base)
+    if candidate.shape != base.shape:
+        raise ValueError(f"ROI blend requires tensors of same shape, got {tuple(candidate.shape)} vs {tuple(base.shape)}")
+    _, _, h, w = candidate.shape
+    rh = max(1, int(h * random.uniform(min_ratio, max_ratio)))
+    rw = max(1, int(w * random.uniform(min_ratio, max_ratio)))
+    y = random.randint(0, max(0, h - rh))
+    x = random.randint(0, max(0, w - rw))
+    alpha = random.uniform(*alpha_range)
+    cand_patch = candidate[:, :, y:y + rh, x:x + rw]
+    base_patch = base[:, :, y:y + rh, x:x + rw]
+    blended_patch = alpha * cand_patch + (1 - alpha) * base_patch
+    candidate[:, :, y:y + rh, x:x + rw] = blended_patch
+    return candidate.squeeze(0)
+
+
 # ---------- evaluate population (with optional repeated measures) ----------
 def evaluate_population(
     model,
@@ -98,6 +189,9 @@ def evaluate_population(
     mode: str = "total_boxes",
     conf_thres: float = 0.25,
     hybrid_weights: Optional[Dict[str, float]] = None,
+    l2_penalty_weight: float = 0.0,
+    smoothness_weight: float = 0.0,
+    perceptual_weight: float = 0.0,
 ):
     """
     population: list of Individual objects.
@@ -141,6 +235,17 @@ def evaluate_population(
 
         # use median for robustness
         fitness_val = float(np.median(measures))
+        if l2_penalty_weight > 0.0 and individual.reference is not None:
+            ref = individual.reference.to(individual.tensor.device)
+            penalty = _normalized_l2_penalty(individual.tensor, ref)
+            fitness_val -= l2_penalty_weight * penalty
+        if smoothness_weight > 0.0:
+            smooth_penalty = _smoothness_penalty(individual.tensor)
+            fitness_val -= smoothness_weight * smooth_penalty
+        if perceptual_weight > 0.0 and individual.reference is not None:
+            percept_penalty = _perceptual_penalty(individual.tensor, individual.reference)
+            fitness_val -= perceptual_weight * percept_penalty
+
         fitnesses.append(fitness_val)
         metadata.append({"raw_measures": measures})
     return fitnesses, metadata
@@ -189,12 +294,8 @@ def crossover_tensor(a: torch.Tensor, b: torch.Tensor, mode="patch"):
         mask = (torch.rand((B, 1, H, W), device=a.device) > 0.5).float()
         child = mask * a + (1 - mask) * b
     else:
-        child = a.clone()
-        ph = random.randint(max(1, H // 10), max(2, H // 3))
-        pw = random.randint(max(1, W // 10), max(2, W // 3))
-        y = random.randint(0, max(0, H - ph))
-        x = random.randint(0, max(0, W - pw))
-        child[:, :, y:y + ph, x:x + pw] = b[:, :, y:y + ph, x:x + pw]
+        blended = _alpha_blend(a, b)
+        child = blended.unsqueeze(0) if blended.ndim == 3 else blended
     return child.squeeze(0) if child.shape[0]==1 else child
 
 
@@ -229,7 +330,11 @@ def genetic_attack_single_model(
     ema_alpha=0.2,
     patience=50,
     tol=1.0,
-    device=None
+    device=None,
+    l2_penalty_weight: float = 0.1,
+    smoothness_weight: float = 0.05,
+    perceptual_weight: float = 0.05,
+    restrict_single_reference: bool = True,
 ):
     if device is None:
         device = getattr(model, "device", None)
@@ -239,16 +344,21 @@ def genetic_attack_single_model(
     need_baseline = mode == "delta_over_baseline"
 
     # build seed bank with baseline stats
+    indexed_inits = list(enumerate(init_images))
+    if restrict_single_reference and indexed_inits:
+        indexed_inits = indexed_inits[:1]
+
     seed_bank: List[Individual] = []
-    for img in init_images:
+    for seed_idx, img in indexed_inits:
         tensor = img.clone().to(device)
+        reference = tensor.clone()
         baseline_stats = None
         if need_baseline:
             batch_tensor = tensor if tensor.ndim == 4 else tensor.unsqueeze(0)
             with torch.no_grad():
                 base_results = model.forward(batch_tensor)
             baseline_stats = _summarize_results(base_results, conf_thres=conf_thres)
-        seed_bank.append(Individual(tensor=tensor, baseline_stats=baseline_stats))
+        seed_bank.append(Individual(tensor=tensor, reference=reference, baseline_stats=baseline_stats, seed_id=seed_idx))
 
     if not seed_bank:
         raise ValueError("init_images must contain at least one tensor.")
@@ -259,7 +369,8 @@ def genetic_attack_single_model(
 
     # cross-generation candidate buffer to stabilize evolution
     pool_capacity = 100
-    candidate_pool: List[Tuple[torch.Tensor, float]] = []
+    candidate_pool: List[Tuple[torch.Tensor, float, Optional[int]]] = []
+    roi_blend_prob = 0.7
 
     best = None
     best_fitness = -float("inf")
@@ -275,6 +386,9 @@ def genetic_attack_single_model(
             mode=mode,
             conf_thres=conf_thres,
             hybrid_weights=hybrid_weights,
+            l2_penalty_weight=l2_penalty_weight,
+            smoothness_weight=smoothness_weight,
+            perceptual_weight=perceptual_weight,
         )
 
         # optional robust re-measure for top candidates
@@ -289,6 +403,9 @@ def genetic_attack_single_model(
                 mode=mode,
                 conf_thres=conf_thres,
                 hybrid_weights=hybrid_weights,
+                l2_penalty_weight=l2_penalty_weight,
+                smoothness_weight=smoothness_weight,
+                perceptual_weight=perceptual_weight,
             )
             for local_idx, global_idx in enumerate(top_idx):
                 fitnesses[global_idx] = refined[local_idx]
@@ -325,7 +442,7 @@ def genetic_attack_single_model(
         # update candidate pool with latest evaluated individuals
         for ind, f in zip(population, fitnesses):
             tensor_cpu = _ensure_three_channels(ind.tensor.detach().cpu().clone())
-            candidate_pool.append((tensor_cpu, float(f)))
+            candidate_pool.append((tensor_cpu, float(f), ind.seed_id))
         candidate_pool.sort(key=lambda x: x[1], reverse=True)
         if len(candidate_pool) > pool_capacity:
             candidate_pool = candidate_pool[:pool_capacity]
@@ -337,22 +454,32 @@ def genetic_attack_single_model(
 
         # generate children
         explore_decay = math.exp(-gen / max(1, 0.3 * max(1, generations)))
-        adaptive_mut_prob = max(mut_prob * 0.3, mut_prob * explore_decay)
+        stagnation_factor = 1.0 + min(1.0, no_improve / max(1, patience))
+        adaptive_mut_prob = float(np.clip(mut_prob * explore_decay * stagnation_factor, 0.2, 0.9))
 
         new_pop = elites.copy()
         while len(new_pop) < pop_size:
             pb = random.choice(elites)
-            if candidate_pool:
-                pool_limit = min(len(candidate_pool), pool_capacity)
-                pa_tensor = random.choice(candidate_pool[:pool_limit])[0].to(device)
+            pool_candidates = [cand for cand in candidate_pool if cand[2] == pb.seed_id]
+            if pool_candidates:
+                pa_tensor = random.choice(pool_candidates)[0].to(device)
             else:
-                pa_tensor = random.choice(elites).tensor
+                same_seed_elites = [e for e in elites if e.seed_id == pb.seed_id]
+                pa_tensor = random.choice(same_seed_elites or elites).tensor
             child_tensor = crossover_tensor(pa_tensor, pb.tensor, mode="patch")
+            mutated = False
             if random.random() < adaptive_mut_prob:
                 child_tensor, _ = apply_mutation_wrapper(child_tensor, pixel_mut, geom_mut, perc_mut)
+                mutated = True
+            if mutated and random.random() < roi_blend_prob:
+                base_tensor = pb.tensor.to(child_tensor.device)
+                child_tensor = _apply_roi_blend(base_tensor, child_tensor)
             baseline_copy = pb.baseline_stats.copy() if pb.baseline_stats else None
+            reference_copy = pb.reference.clone() if pb.reference is not None else None
             child = Individual(
                 tensor=child_tensor,
+                reference=reference_copy,
+                seed_id=pb.seed_id,
                 baseline_stats=baseline_copy,
             )
             new_pop.append(child)
